@@ -10,23 +10,25 @@ from io import BytesIO
 from pathlib import Path
 
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import filedialog, messagebox
 import pygame
 from PIL import Image
-from mutagen import File as MutagenFile  # lire la durée exacte
+from mutagen import File as MutagenFile  # precise duration
 
-# CairoSVG optionnel : on gère un fallback si absent
+# CairoSVG is optional; we degrade gracefully if it's missing
 try:
-    import cairosvg  # pour rasteriser les SVG en PNG en mémoire
+    import cairosvg  # rasterize SVG → PNG in memory
     _HAS_CAIROSVG = True
 except Exception:
     cairosvg = None
     _HAS_CAIROSVG = False
 
 
-APP_TITLE = " MP3 Player"
+APP_TITLE = " MP3 Player by Zunochikirin"
 SUPPORTED_EXT = {".mp3", ".ogg", ".wav", ".flac", ".m4a"}
 PLAYLISTS_FILE = "playlists.json"
+WINDOW_STATE_FILE = "window.json"
 
 # ---------- Layout constants ----------
 BTN_W = 56
@@ -40,14 +42,13 @@ ICON_NOW_PX  = 20
 ICON_VOL_PX  = 18
 
 
-# ---------- Utilitaires log ----------
+# ---------- Logging helper ----------
 def log(msg: str):
     print(f"[MP3Player] {msg}")
 
 
-# ---------- Helpers thème/couleurs ----------
+# ---------- Theme / color helpers ----------
 def theme_ink() -> str:
-    # texte d'icône (noir en light, blanc en dark)
     return "#111111" if ctk.get_appearance_mode().lower() == "light" else "#ffffff"
 
 def accent_color() -> tuple[str, str]:
@@ -72,10 +73,22 @@ def fmt_time(sec: float | None) -> str:
     s = int(sec) % 60
     return f"{m:02d}:{s:02d}"
 
+def _natural_key(p: Path):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', p.stem)]
 
-# ---------- Rasterize + tint SVG → CTkImage ----------
+def shade_hex(col: str, factor: float) -> str:
+    """Lighten/darken a #rrggbb by factor (>1 lighter, <1 darker)."""
+    c = col.lstrip("#")
+    if len(c) == 3:
+        c = "".join(ch * 2 for ch in c)
+    r = max(0, min(255, int(int(c[0:2], 16) * factor)))
+    g = max(0, min(255, int(int(c[2:4], 16) * factor)))
+    b = max(0, min(255, int(int(c[4:6], 16) * factor)))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+# ---------- SVG → CTkImage (tint + rasterize) ----------
 def _tint_svg_text(svg: str, color: str, size_px: int | None) -> str:
-    # Ajoute color (currentColor) + remplace fill/stroke sauf fill="none"
     if "<svg" in svg:
         if re.search(r'\bstyle\s*=', svg, re.I):
             svg = re.sub(r'(<svg[^>]*\bstyle\s*=\s*["\'])', r'\1color:' + color + ';', svg, count=1, flags=re.I)
@@ -138,7 +151,6 @@ def ctk_image_from_svg_file(path: Path, color: str, size_px: int | None) -> "ctk
 
     svg_tinted = _tint_svg_text(svg_text, color, size_px)
 
-    # Si CairoSVG indisponible → fallback : pas d’icône mais on ne crash pas
     if not _HAS_CAIROSVG:
         log(f"ℹ️ CairoSVG not available; skipping rasterization for {path.name}")
         return None
@@ -158,7 +170,7 @@ def ctk_image_from_svg_file(path: Path, color: str, size_px: int | None) -> "ctk
         return None
 
 
-# ---------- Custom SVG Button ----------
+# ---------- Small custom button with SVG image ----------
 class SvgButton(ctk.CTkFrame):
     def __init__(self, master, image, command,
                  fg_color=("gray85", "gray20"), hover_color=None,
@@ -201,7 +213,7 @@ class SvgButton(ctk.CTkFrame):
         return _one(color)
 
 
-# ---------- Application ----------
+# ---------- Main Application ----------
 class MP3Player(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -210,9 +222,17 @@ class MP3Player(ctk.CTk):
         self.geometry("820x650")
         self.minsize(720, 540)
 
+        # Restore previous window geometry
+        try:
+            wstate = json.loads(Path(WINDOW_STATE_FILE).read_text(encoding="utf-8"))
+            geo = wstate.get("geo")
+            if geo: self.geometry(geo)
+        except Exception:
+            pass
+
         pygame.mixer.init()
 
-        # State
+        # Playback state
         self.playlist: list[Path] = []
         self.current_index: int | None = None
         self.paused = False
@@ -223,33 +243,41 @@ class MP3Player(ctk.CTk):
         self.track_duration_s: float | None = None
         self.elapsed_base_ms: int = 0
 
-        # Playlists persistence
+        # Persisted playlists
         self.playlists: dict[str, list[str]] = self._load_playlists_file()
 
-        # Temp WAV (fallback m4a)
+        # Temp WAV cache for FFmpeg M4A fallback
         self._temp_files: list[Path] = []
 
-        # Appearance
+        # Appearance defaults
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
+        # Icons and cached row icons
         self.icons: dict[str, ctk.CTkImage | None] = {}
+        self.row_icon_default = None
+        self.row_icon_accent = None
+        self.shuffle_icon_default = None
+        self.shuffle_icon_accent = None
+
+        # Zebra colors
+        self._bg_even = None
+        self._bg_odd = None
 
         self._build_ui()
         self._load_icons()
         self._apply_static_icons()
+        self._apply_shuffle_icon()
         self._poll_playback()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    # Définit l’icône de fenêtre et de taskbar pour CustomTkinter
+    # ----- App & taskbar icons -----
     def _set_app_icons(self):
         import platform, ctypes
-        import tkinter as tk
         base_dir = Path(__file__).resolve().parent
         ico_path = base_dir / "assets" / "app.ico"
         png_path = base_dir / "assets" / "app.png"
 
-        # Windows : fixe l’AppUserModelID (nécessaire pour taskbar)
         if platform.system() == "Windows":
             try:
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -258,7 +286,6 @@ class MP3Player(ctk.CTk):
             except Exception:
                 pass
 
-        # 1) Essaye .ico (meilleur pour Windows)
         if ico_path.exists():
             try:
                 self.iconbitmap(default=str(ico_path))
@@ -266,27 +293,21 @@ class MP3Player(ctk.CTk):
             except Exception:
                 pass
 
-        # 2) Fallback PNG
         if png_path.exists():
             try:
-                img = ctk.CTkImage(Image.open(png_path))
-                # CustomTkinter n’a pas iconphoto() directement, mais hérite de Tk :
                 self.iconphoto(True, tk.PhotoImage(file=str(png_path)))
-                self._iconphoto_ref = img  # garde référence pour éviter le GC
             except Exception as e:
                 print(f"⚠️ Cannot set PNG icon: {e}")
 
-    # ---------- UI ----------
+    # ----- UI -----
     def _build_ui(self):
-        # ---------- HEADER ----------
+        # Header shell + inner content (rounded corners preserved)
         self.header = ctk.CTkFrame(self, corner_radius=12)
         self.header.pack(fill="x", padx=16, pady=16)
-
-        # Sous-frame interne pour préserver les coins arrondis
         self.header_content = ctk.CTkFrame(self.header, fg_color="transparent")
         self.header_content.pack(fill="x", padx=10, pady=10)
 
-        # Boutons Add / Folder / Clear
+        # Header controls
         self.add_btn = SvgButton(self.header_content, image=None, command=self.add_files,
                                  fg_color=accent_color())
         self.add_btn.pack(side="left", padx=BTN_GAP)
@@ -299,7 +320,7 @@ class MP3Player(ctk.CTk):
                                    fg_color=dim_color())
         self.clear_btn.pack(side="left", padx=BTN_GAP)
 
-        # Sélecteur de playlist
+        # Playlist selector
         self.playlist_combo = ctk.CTkComboBox(self.header_content,
                                               values=sorted(self.playlists.keys()) if self.playlists else [],
                                               state="readonly",
@@ -311,17 +332,16 @@ class MP3Player(ctk.CTk):
                                          command=self._on_load_selected_playlist)
         self.load_pl_btn.pack(side="left", padx=(0, BTN_GAP))
 
-        # Switch de thème
         self.theme_switch = ctk.CTkSwitch(self.header_content, text="Dark Mode", command=self._toggle_theme)
         self.theme_switch.select()
         self.theme_switch.pack(side="right", padx=10)
 
-        # ---------- PLAYLIST ----------
+        # Playlist area
         self.list_container = ctk.CTkScrollableFrame(self, corner_radius=12)
         self.list_container.pack(fill="both", expand=True, padx=16, pady=(8, 6))
         self.row_widgets: list[ctk.CTkFrame] = []
 
-        # ---------- NOW PLAYING ----------
+        # Now-playing bar
         self.now_frame = ctk.CTkFrame(self, corner_radius=0, height=72, fg_color=accent_color())
         self.now_frame.pack(fill="x", pady=(4, 0))
         self.now_frame.pack_propagate(False)
@@ -343,15 +363,12 @@ class MP3Player(ctk.CTk):
                                                progress_color="#FFFFFF", height=6)
         self.progress_bar.pack(fill="x", padx=16, pady=(2, 10))
 
-        # ---------- FOOTER ----------
+        # Footer (transport + volume + shuffle button)
         self.footer = ctk.CTkFrame(self, corner_radius=12)
         self.footer.pack(fill="x", padx=16, pady=16)
-
-        # Sous-frame interne (fix coins arrondis)
         self.footer_content = ctk.CTkFrame(self.footer, fg_color="transparent")
         self.footer_content.pack(fill="x", padx=10, pady=10)
 
-        # Left controls
         self.left_controls = ctk.CTkFrame(self.footer_content, fg_color="transparent")
         self.left_controls.pack(side="left", padx=10, pady=6)
 
@@ -363,20 +380,20 @@ class MP3Player(ctk.CTk):
                                   fg_color=accent_color())
         self.play_btn.pack(side="left", padx=BTN_GAP)
 
-        self.stop_btn = SvgButton(self.left_controls, image=None, command=self.stop,
-                                  fg_color=dim_color())
-        self.stop_btn.pack(side="left", padx=BTN_GAP)
-
         self.next_btn = SvgButton(self.left_controls, image=None, command=self.next_track,
                                   fg_color=dim_color())
         self.next_btn.pack(side="left", padx=BTN_GAP)
 
-        self.shuffle_var = ctk.BooleanVar(value=False)
-        self.shuffle_check = ctk.CTkCheckBox(self.left_controls, text="Shuffle",
-                                             variable=self.shuffle_var, command=self.toggle_shuffle)
-        self.shuffle_check.pack(side="left", padx=(BTN_GAP * 2, 0))
+        # NEW: Shuffle icon button (replaces checkbox)
+        self.shuffle_btn = SvgButton(
+            self.left_controls,
+            image=None,
+            command=self.toggle_shuffle,
+            fg_color=dim_color()
+        )
+        self.shuffle_btn.pack(side="left", padx=(BTN_GAP * 2, 0))
 
-        # Right: volume
+        # Volume
         self.volume_frame = ctk.CTkFrame(self.footer_content, fg_color="transparent")
         self.volume_frame.pack(side="right", padx=10, pady=6)
 
@@ -391,7 +408,7 @@ class MP3Player(ctk.CTk):
 
         pygame.mixer.music.set_volume(0.8)
 
-    # ---------- ICONS ----------
+    # ----- Icons -----
     def _load_icons(self):
         ink = theme_ink()
         try:
@@ -415,54 +432,68 @@ class MP3Player(ctk.CTk):
                 log(f"⚠️ Failed to create image for: {name}")
             return img
 
-        # Header / Footer buttons (uniform size)
+        # Header / footer
         self.icons["add"]    = load("plus.svg",          ICON_BTN_PX)
         self.icons["folder"] = load("add-folder.svg",    ICON_BTN_PX)
         self.icons["clear"]  = load("close.svg",         ICON_BTN_PX)
-
         self.icons["play"]   = load("start.svg",         ICON_BTN_PX)
         self.icons["pause"]  = load("pause-button.svg",  ICON_BTN_PX)
-        self.icons["stop"]   = load("stop.svg",          ICON_BTN_PX)
         self.icons["prev"]   = load("back.svg",          ICON_BTN_PX)
         self.icons["next"]   = load("next.svg",          ICON_BTN_PX)
 
-        # Other icons
+        # Other
         self.icons["music_tune"] = load("music-tune.svg",   ICON_LIST_PX)
         self.icons["music_sign"] = load("music-sign.svg",   ICON_NOW_PX)
         self.icons["volume"]     = load("medium-volume.svg", ICON_VOL_PX)
 
+        # Cached row icons (default/accent)
+        mt_path = icon_dir / "music-tune.svg"
+        is_dark = ctk.get_appearance_mode().lower() == "dark"
+        accent = accent_color()[1] if is_dark else accent_color()[0]
+        self.row_icon_default = ctk_image_from_svg_file(mt_path, theme_ink(), size_px=ICON_LIST_PX)
+        self.row_icon_accent  = ctk_image_from_svg_file(mt_path, accent,      size_px=ICON_LIST_PX)
+
+        # Shuffle icons (default/accent)
+        shuf_path = icon_dir / "shuffle.svg"
+        self.shuffle_icon_default = ctk_image_from_svg_file(shuf_path, theme_ink(), size_px=ICON_BTN_PX)
+        self.shuffle_icon_accent  = ctk_image_from_svg_file(shuf_path, accent,      size_px=ICON_BTN_PX)
+
         self._apply_static_icons()
         self._refresh_playlist()
+        self._apply_shuffle_icon()
 
     def _apply_static_icons(self):
         if not self.icons:
             return
-        # Header
         self.add_btn.set_image(self.icons.get("add"))
         self.folder_btn.set_image(self.icons.get("folder"))
         self.clear_btn.set_image(self.icons.get("clear"))
-        # Footer
         self.prev_btn.set_image(self.icons.get("prev"))
-        self.stop_btn.set_image(self.icons.get("stop"))
         self.next_btn.set_image(self.icons.get("next"))
         self._apply_play_icon()
-        # Now playing + volume
         self.now_icon.configure(image=self.icons.get("music_sign"), text="")
         self.volume_icon.configure(image=self.icons.get("volume"), text="")
+        self._apply_shuffle_icon()
 
     def _apply_play_icon(self):
         is_playing = (self.current_index is not None) and pygame.mixer.music.get_busy() and not self.paused
         self.play_btn.set_image(self.icons.get("pause") if is_playing else self.icons.get("play"))
 
-    # ---------- Theme toggle ----------
+    def _apply_shuffle_icon(self):
+        if hasattr(self, "shuffle_btn"):
+            img = self.shuffle_icon_accent if self.shuffle else self.shuffle_icon_default
+            self.shuffle_btn.set_image(img)
+
+    # ----- Theme toggle -----
     def _toggle_theme(self):
         current = ctk.get_appearance_mode()
         ctk.set_appearance_mode("light" if current == "Dark" else "dark")
         self._load_icons()
         self.now_frame.configure(fg_color=accent_color())
         self._refresh_playlist()
+        self._apply_shuffle_icon()
 
-    # ---------- Playlists persistence ----------
+    # ----- Playlists persistence -----
     def _load_playlists_file(self) -> dict:
         p = Path(PLAYLISTS_FILE)
         if not p.exists():
@@ -497,84 +528,91 @@ class MP3Player(ctk.CTk):
         self._load_playlist_paths(paths)
 
     def _load_playlist_paths(self, paths: list[str]):
-        self.stop()
+        self._halt_playback()
+        self.current_index = None
         self.playlist.clear()
         for p in paths:
             pp = Path(p)
             if pp.exists() and pp.suffix.lower() in SUPPORTED_EXT:
                 self.playlist.append(pp)
+        self.playlist.sort(key=_natural_key)
         self._refresh_playlist()
         if self.playlist:
             self.now_label.configure(text=f"Loaded playlist: {display_name(Path(self.playlist[0]), 50)}")
 
-    # ---------- Playlist (UI) ----------
+    # ----- Playlist UI -----
     def _refresh_playlist(self):
-        # Nettoyage complet
         for child in self.list_container.winfo_children():
             child.destroy()
         self.row_widgets = []
 
-        # Palette de référence
-        light_dim, dark_dim = dim_color()                # gris moyens
-        light_sep, dark_sep = list_separator_color()     # gris clairs/foncés
-
-        # Couleurs de fond alternées selon le thème
         if ctk.get_appearance_mode().lower() == "dark":
-            # 🎨 Mode sombre : deux gris proches, subtils
-            bg_even = "#2d2d36"   # gris foncé principal (lignes paires)
-            bg_odd  = "#34343f"   # gris légèrement plus clair (lignes impaires)
+            self._bg_even = "#2d2d36"
+            self._bg_odd  = "#34343f"
+            hover_factor = 1.06
         else:
-            # 🎨 Mode clair : on garde la palette cohérente d’origine
-            bg_even = light_sep   # ex: #dcdcdc
-            bg_odd  = light_dim   # ex: #d0d0d0
-
-        # Couleur d'accent (pour icône active)
-        accent = accent_color()[1] if ctk.get_appearance_mode().lower() == "dark" else accent_color()[0]
+            light_dim, _ = dim_color()
+            light_sep, _ = list_separator_color()
+            self._bg_even = light_sep
+            self._bg_odd  = light_dim
+            hover_factor = 0.97
 
         for idx, path in enumerate(self.playlist):
-            # Couleur alternée
-            bg = bg_even if idx % 2 == 0 else bg_odd
+            base_bg = self._bg_even if idx % 2 == 0 else self._bg_odd
+            hover_bg = shade_hex(base_bg, hover_factor)
 
-            # Ligne
-            row = ctk.CTkFrame(self.list_container, corner_radius=8, fg_color=bg)
+            row = ctk.CTkFrame(self.list_container, corner_radius=8, fg_color=base_bg)
             row.pack(fill="x", padx=12, pady=(2, 0))
+            row._base_bg = base_bg
+            row._hover_bg = hover_bg
+            row._is_selected = False
             self.row_widgets.append(row)
 
-            # Couleur de l’icône
-            ink_color = accent if idx == self.current_index else theme_ink()
-
-            # Chargement icône “music-tune” recolorée
-            try:
-                icon_path = Path(__file__).parent / "icons" / "music-tune.svg"
-                icon_img = ctk_image_from_svg_file(icon_path, ink_color, size_px=ICON_LIST_PX)
-            except Exception as e:
-                print(f"⚠️ Icon tint failed: {e}")
-                icon_img = None
-
+            icon_img = self.row_icon_accent if idx == self.current_index else self.row_icon_default
             icon = ctk.CTkLabel(row, image=icon_img, text="")
             icon.pack(side="left", padx=(10, 8), pady=8)
 
             lbl = ctk.CTkLabel(row, text=display_name(path, 80), anchor="w")
             lbl.pack(side="left", fill="x", expand=True, padx=(0, 10), pady=8)
 
-            # Clics
             for w in (row, icon, lbl):
                 w.bind("<Button-1>", lambda e, i=idx: self._on_select(i))
                 w.bind("<Double-Button-1>", lambda e, i=idx: self._start_play(i))
 
-    def _on_select(self, index: int):
-        for i, row in enumerate(self.row_widgets):
-            row.configure(fg_color=("#ececff", "#2f2b47") if i == index else "transparent")
+            def _enter(ev, r=row):
+                if not getattr(r, "_is_selected", False):
+                    r.configure(fg_color=r._hover_bg)
+            def _leave(ev, r=row):
+                if not getattr(r, "_is_selected", False):
+                    r.configure(fg_color=r._base_bg)
+            row.bind("<Enter>", _enter)
+            row.bind("<Leave>", _leave)
 
-    # ---------- File/Folder ----------
+    def _on_select(self, index: int):
+        sel = "#3b3b46" if ctk.get_appearance_mode().lower() == "dark" else "#e6e6e6"
+        for i, row in enumerate(self.row_widgets):
+            if i == index:
+                row._is_selected = True
+                row.configure(fg_color=sel)
+            else:
+                row._is_selected = False
+                row.configure(fg_color=row._base_bg)
+
+    # ----- File / folder add -----
     def add_files(self):
         paths = filedialog.askopenfilenames(
             title="Add audio files",
             filetypes=[("Audio", "*.mp3 *.ogg *.wav *.flac *.m4a"), ("All files", "*.*")]
         )
+        if not paths:
+            return
+        seen = set(map(str, self.playlist))
         for p in paths:
-            if Path(p).suffix.lower() in SUPPORTED_EXT:
-                self.playlist.append(Path(p))
+            pp = Path(p)
+            if pp.suffix.lower() in SUPPORTED_EXT and str(pp) not in seen:
+                self.playlist.append(pp)
+                seen.add(str(pp))
+        self.playlist.sort(key=_natural_key)
         self._refresh_playlist()
 
     def add_folder(self):
@@ -586,30 +624,40 @@ class MP3Player(ctk.CTk):
         base_name = Path(folder).name or "Playlist"
         files_in = []
 
+        seen = set(map(str, self.playlist))
         for root, _, files in os.walk(folder):
             for name in files:
-                if Path(name).suffix.lower() in SUPPORTED_EXT:
-                    full = str(Path(root) / name)
-                    self.playlist.append(Path(full))
-                    files_in.append(full)
+                pp = Path(root) / name
+                if pp.suffix.lower() in SUPPORTED_EXT:
+                    s = str(pp)
+                    if s not in seen:
+                        self.playlist.append(pp)
+                        files_in.append(s)
+                        seen.add(s)
 
+        self.playlist.sort(key=_natural_key)
         self._refresh_playlist()
-        playlist_name = self._unique_playlist_name(base_name)
-        self.playlists[playlist_name] = files_in
-        self._save_playlists_file()
-        self.playlist_combo.configure(values=sorted(self.playlists.keys()))
-        self.playlist_combo.set(playlist_name)
-        self.now_label.configure(text=f"Playlist saved: {playlist_name}")
+
+        if files_in:
+            playlist_name = self._unique_playlist_name(base_name)
+            self.playlists[playlist_name] = files_in
+            self._save_playlists_file()
+            self.playlist_combo.configure(values=sorted(self.playlists.keys()))
+            self.playlist_combo.set(playlist_name)
+            self.now_label.configure(text=f"Playlist saved: {playlist_name}")
+        else:
+            self.now_label.configure(text="No new audio files found")
 
     def clear_playlist(self):
-        self.stop()
+        self._halt_playback()
+        self.current_index = None
         self.playlist.clear()
         self._refresh_playlist()
         self.now_label.configure(text="Playlist cleared")
         self.time_label.configure(text="00:00 / 00:00")
         self.progress_var.set(0)
 
-    # ---------- Playback ----------
+    # ----- Playback -----
     def play_pause(self):
         if self.current_index is None and self.playlist:
             self._start_play(0)
@@ -630,32 +678,48 @@ class MP3Player(ctk.CTk):
 
         self._apply_play_icon()
 
-    def stop(self):
-        self.user_stopped = True
-        pygame.mixer.music.stop()
-        self.paused = False
-        self.elapsed_base_ms = 0
-        self.progress_var.set(0)
-        self.time_label.configure(text="00:00 / " + (fmt_time(self.track_duration_s) if self.track_duration_s else "00:00"))
-        self._apply_play_icon()
-        self.now_label.configure(text="Stopped")
-
     def prev_track(self):
         if not self.playlist:
             return
         idx = (self.current_index - 1) % len(self.playlist) if self.current_index is not None else 0
         self._start_play(idx)
 
+    # --- Smarter shuffle picker ---
+    def _pick_shuffle_index(self) -> int | None:
+        n = len(self.playlist)
+        if n == 0:
+            return None
+        if self.current_index is None:
+            return random.randrange(n)
+
+        next_seq = (self.current_index + 1) % n
+        forbidden = {self.current_index, next_seq}
+
+        if n <= len(forbidden):
+            for i in range(n):
+                if i != self.current_index:
+                    return i
+            return None
+
+        choices = [i for i in range(n) if i not in forbidden]
+        return random.choice(choices) if choices else None
+
     def next_track(self):
         if not self.playlist:
             return
-        idx = random.choice(range(len(self.playlist))) if self.shuffle else (
-            (self.current_index + 1) % len(self.playlist) if self.current_index is not None else 0
-        )
+
+        if self.shuffle:
+            idx = self._pick_shuffle_index()
+            if idx is None:
+                return
+        else:
+            idx = (self.current_index + 1) % len(self.playlist) if self.current_index is not None else 0
+
         self._start_play(idx)
 
     def toggle_shuffle(self):
-        self.shuffle = bool(self.shuffle_var.get())
+        self.shuffle = not self.shuffle
+        self._apply_shuffle_icon()
 
     def _on_volume(self, val):
         try:
@@ -674,12 +738,11 @@ class MP3Player(ctk.CTk):
             log(f"⚠️ Duration read failed for {path}: {e}")
         return None
 
-    # ---------- Fallback .m4a → WAV ----------
+    # ----- M4A fallback via FFmpeg -----
     def _ffmpeg_path(self) -> str | None:
         return shutil.which("ffmpeg")
 
     def _transcode_to_wav(self, src: Path) -> Path | None:
-        """Transcode src (.m4a) en .wav temporaire via ffmpeg. Retourne le chemin WAV ou None."""
         ffmpeg = self._ffmpeg_path()
         if not ffmpeg:
             return None
@@ -698,27 +761,18 @@ class MP3Player(ctk.CTk):
         return None
 
     def _ensure_playable_path(self, path: Path) -> Path:
-        """
-        Pour .m4a : on tente d'abord un chargement direct; si pygame échoue,
-        on transcode en WAV temporaire et on renvoie ce chemin.
-        Pour autres formats : renvoie le chemin d'origine.
-        """
         if path.suffix.lower() != ".m4a":
             return path
 
-        # 1) Essai direct (selon SDL_mixer, ça peut fonctionner)
         try:
             pygame.mixer.music.load(str(path))
-            return path
+            return path  # native support available
         except Exception:
             pass
 
-        # 2) Fallback FFmpeg → WAV
         wav = self._transcode_to_wav(path)
         if wav:
             return wav
-
-        # 3) Sans ffmpeg, on renverra l'erreur standard plus bas
         return path
 
     def _start_play(self, index: int):
@@ -735,27 +789,24 @@ class MP3Player(ctk.CTk):
             self.elapsed_base_ms = 0
             self._apply_play_icon()
 
-            # Durée : on lit la durée du fichier d'origine (mutagen gère bien .m4a)
             self.track_duration_s = self._read_duration_seconds(orig_path)
-
             self.now_label.configure(text=f"Now playing: {display_name(orig_path, 60)}")
-            right = fmt_time(0)
-            left = fmt_time(self.track_duration_s) if self.track_duration_s else "00:00"
-            self.time_label.configure(text=f"{right} / {left}")
+            self.time_label.configure(text=f"{fmt_time(0)} / {fmt_time(self.track_duration_s) if self.track_duration_s else '00:00'}")
             self.progress_var.set(0)
 
             self._refresh_playlist()
+            self._on_select(index)
+
         except Exception as e:
             if orig_path.suffix.lower() == ".m4a" and not self._ffmpeg_path():
-                message = ("Impossible de lire ce .m4a.\n\n"
-                           "Installez FFmpeg (dans le PATH) pour activer le fallback, "
-                           "ou convertissez le fichier en .mp3/.wav.")
+                message = ("Unable to play this .m4a.\n\n"
+                           "Install FFmpeg (in PATH) to enable the fallback, "
+                           "or convert the file to .mp3/.wav.")
             else:
                 message = str(e)
             messagebox.showerror("Error", f"Cannot play:\n{orig_path}\n\n{message}")
 
     def _poll_playback(self):
-        """Update progress bar + time label and chain next track."""
         if self.current_index is not None:
             try:
                 cur_ms = max(0, pygame.mixer.music.get_pos())
@@ -777,14 +828,32 @@ class MP3Player(ctk.CTk):
 
         self.after(200, self._poll_playback)
 
-    # ---------- Clean close ----------
+    # ----- Internal halt (no public Stop button) -----
+    def _halt_playback(self):
+        """Internal helper to stop playback & reset UI (used by clear/load)."""
+        try:
+            self.user_stopped = True
+            pygame.mixer.music.stop()
+        except Exception:
+            pass
+        self.paused = False
+        self.elapsed_base_ms = 0
+        self.progress_var.set(0)
+        self._apply_play_icon()
+        self.time_label.configure(text="00:00 / " + (fmt_time(self.track_duration_s) if self.track_duration_s else "00:00"))
+        self.now_label.configure(text="Stopped")
+
+    # ----- Clean close -----
     def on_close(self):
+        try:
+            Path(WINDOW_STATE_FILE).write_text(json.dumps({"geo": self.geometry()}), encoding="utf-8")
+        except Exception:
+            pass
         try:
             pygame.mixer.music.stop()
             pygame.mixer.quit()
         except Exception:
             pass
-        # nettoyage des fichiers temporaires
         for p in set(self._temp_files):
             try:
                 p.unlink(missing_ok=True)

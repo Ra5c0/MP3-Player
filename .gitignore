@@ -33,6 +33,7 @@ Thumbs.db
 
 # ---- Projet spécifique ----
 /playlists.json
+/window.json
 /test.py
 /todo
 
