@@ -32,9 +32,10 @@ dist/
 *.spec
 
 # ---- Projet spécifique ----
-playlists.json   # si tu veux garder ta version locale sans commit
-test.py          # script de test local
-todo             # fichier de notes ou tâches perso
+**/playlists.json
+**/test.py
+**/todo
+
 
 # ---- OS ----
 desktop.ini
