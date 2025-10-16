@@ -1,0 +1,40 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.log
+
+# ---- Environnements virtuels ----
+venv/
+env/
+.venv/
+
+# ---- Fichiers système / IDE ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- Fichiers temporaires ----
+*.tmp
+*.bak
+*.old
+*.cache
+
+# ---- Build / Dist ----
+build/
+dist/
+*.egg-info/
+*.spec
+
+# ---- Projet spécifique ----
+playlists.json  # si tu veux garder ta version locale sans commit
+test.py          # script de test local
+todo             # fichier de notes ou tâches perso
+
+# ---- OS ----
+desktop.ini
