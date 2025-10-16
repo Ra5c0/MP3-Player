@@ -1,0 +1,6 @@
+pygame
+customtkinter
+tksvg
+mutagen
+pillow
+cairosvg 
