@@ -1,5 +1,5 @@
 # ---- Python ----
-__pycache__/
+/__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -7,9 +7,9 @@ __pycache__/
 *.log
 
 # ---- Environnements virtuels ----
-venv/
-env/
-.venv/
+/venv/
+/env/
+/.venv/
 
 # ---- Fichiers système / IDE ----
 .DS_Store
@@ -26,16 +26,16 @@ Thumbs.db
 *.cache
 
 # ---- Build / Dist ----
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 *.spec
 
 # ---- Projet spécifique ----
-**/playlists.json
-**/test.py
-**/todo
+/playlists.json
+/test.py
+/todo
 
 
 # ---- OS ----
-desktop.ini
+**/desktop.ini
