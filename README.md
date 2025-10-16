@@ -5,14 +5,6 @@ Ce projet permet de lire, gérer et organiser facilement vos morceaux de musique
 
 ---
 
-## 🖥️ Aperçu
-
-![App Screenshot](assets/app.png)
-
-Interface simple, sombre et fluide — tout est pensé pour une expérience musicale agréable et minimaliste.
-
----
-
 ## 🚀 Fonctionnalités principales
 
 - 🎧 Lecture audio de fichiers `.mp3`, `.wav`, `.ogg`, `.flac`, `.m4a`
